@@ -198,9 +198,10 @@ train.path &lt;- file.path(&quot;data&quot;, &quot;train.csv&quot;)
 
 if (!(file.exists(train.path))) {
     download.file(url = train.url, destfile = train.path)
-}
-
-test.url &lt;- &quot;https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv&quot;
+}</code></pre>
+<pre><code>## Warning in download.file(url = train.url, destfile = train.path): загруженный
+## размер 5939200 != сообщенному размеру 12202745</code></pre>
+<pre class="r"><code>test.url &lt;- &quot;https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv&quot;
 test.path &lt;- file.path(&quot;data&quot;, &quot;test.csv&quot;)
 
 if (!(file.exists(test.path))) {
