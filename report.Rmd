@@ -1,0 +1,399 @@
+---
+title: "Prediction of common mistakes when training with dumbbells."
+author: "Sukhovei Mikhail"
+date: "17 06 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(rmarkdown)
+library(kableExtra)
+library(cvms)
+
+library(caret)
+library(randomForest)
+
+knitr::opts_chunk$set(echo = TRUE)
+
+set.seed(0)
+```
+
+# Executive Summary
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. Based on this information, you can give recommendations to the user when performing physical exercises, such as lifting dumbbells. In the study [Velloso E. et al., 2013], data were collected from sensors during exercises with dumbbells. In this article, based on these data, a model is built to predict the correctness of the exercise.
+
+This work presents a method for data cleaning, and examines how data preprocessing using Principal Component Analysis affects the classification accuracy. The Random Forest model is selected for classification. As a result, it was found that the data from the arm sensor is of the least importance for building a model.
+
+When using a random forest model without preprocessing, it gives cross validation accuracy 99.2% and test accuracy 99.7%. While using PCA preprocessing with random forest gives cross validation accuracy 96.8% and test accuracy 98.1%.
+
+# Explanatory Data Analysis
+
+## 1. Data loading
+
+The dataset is part of a study [Velloso E. et al, 2013] that investigated how well a person performs exercises with lifting dumbbells in each specific moment of time. Six volunteers with sensors attached to their belts, forearms, arms and dumbbells recorded how they performed the exercise.
+
+Participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+The training data for this project are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+Original dataset are avaliable here:
+
+http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har
+
+```{r}
+train.url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+train.path <- file.path("data", "train.csv")
+
+if (!(file.exists(train.path))) {
+    download.file(url = train.url, destfile = train.path)
+}
+
+test.url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+test.path <- file.path("data", "test.csv")
+
+if (!(file.exists(test.path))) {
+    download.file(url = test.url, destfile = test.path)
+}
+```
+
+First, we remove additional columns:
+
+* `classe` in train `data.frame`
+* `problem_id` in test `data.frame`
+
+```{r, cache=TRUE}
+train <- read.csv(train.url)
+labels <- train$classe
+train$classe <- NULL
+
+test <- read.csv(test.url)
+problem.id <- test$problem_id
+test$problem_id <- NULL
+```
+
+## 2. Data cleaning
+
+### a) data summary
+
+Let's present the training and test data sets in the form of a pivot table. In this table, we will write:
+
+* `name` feature name
+* `NA_train` number of NA samples in training set
+* `NA_test` number of NA samples in test set
+* `class_train` class of feature in training set
+* `class_test` class of feature in test set
+* `unique_train` number of unique values in training set
+* `unique_test` number of unique values in test set
+
+```{r}
+NA.train.sum <- colSums(is.na(train))
+NA.test.sum <- colSums(is.na(test))
+
+train.unique <- integer()
+test.unique <- integer()
+for (name in names(train)) {
+    train.unique[length(train.unique) + 1] <- length(table(train[[name]]))
+    test.unique[length(test.unique) + 1] <- length(table(test[[name]]))
+}
+
+data.summary <- data.frame(
+    name = names(NA.train.sum),
+    NA_train = unname(NA.train.sum),
+    NA_test = unname(NA.test.sum),
+    class_train = unname(sapply(train, class)),
+    class_test = unname(sapply(test, class)),
+    unique_train = train.unique,
+    unique_test = test.unique
+)
+```
+
+```{r, layout="l-body-outset"}
+paged_table(data.summary)
+```
+
+In this table we see that:
+
+* some features have only NA in the test set or in both training and test sets (`kurtosis`, `skewness`, `max`, `min`, `amplitude`, `var`, `avg`, `stddev`). These features should be removed;
+* other features have no NA (`user_name`, `raw_timestamp_part_1`, `raw_timestamp_part_2`, `cvtd_timestamp`, `new_window`, `num_window`, `roll`, `pitch`, `yaw`, `total_accel`, `gyros`, `accel`, `magnet`);
+* some features have an integer class, and some are numeric. All continuous features must be converted to a numeric type.
+
+
+### b) NA removing
+
+For both training and test sets, we will remove features that have only NA in the test or in the training set.
+
+```{r}
+NA.names <- data.summary$name[
+    (data.summary$NA_train > 0) | (data.summary$NA_test > 0)
+]
+```
+
+```{r}
+train <- train[, -which(names(train) %in% NA.names)]
+test <- test[, -which(names(test) %in% NA.names)]
+```
+
+### c) not important features
+
+Some features are apparently not important or may even lead to data leaks:
+
+* The authors of the original article [Velloso E. et al., 2013] claim that the data processed by the sliding window method with a window length from 0.5 to 2.5 seconds and an overlap of 0.5 seconds. From the data, we can see that the `new_window` feature provides the boundaries of such windows and that the window length is 2.5 seconds in the provided data. Probably for the reason that the 2.5-second window provides maximum accuracy. We don't need this information in the model, so we remove the `new_window` feature;
+* `num_window` is the ordered number of window, `X` is an index which provided without name, `cvtd_timestamp` is date information, `raw_timestamp_part_1` is time in seconds, `raw_timestamp_part_2` is milliseconds addition to the time. All this features can provide prior knowledge about target class if exercises were recorded in certain order. This information must be removed.
+* `num_window` is the window number, `X` is the index, `cvtd_timestamp` is the date information, `raw_timestamp_part_1` is the time in seconds, `raw_timestamp_part_2` is the addition of milliseconds to the time. All these functions can provide prior knowledge about the target class, if the exercises were recorded in a certain order. This information should be deleted.
+
+```{r}
+train$new_window <- NULL
+train$num_window <- NULL
+train$X <- NULL
+train$cvtd_timestamp <- NULL
+train$raw_timestamp_part_1 <- NULL
+train$raw_timestamp_part_2 <- NULL
+
+test$new_window <- NULL
+test$num_window <- NULL
+test$X <- NULL
+test$cvtd_timestamp <- NULL
+test$raw_timestamp_part_1 <- NULL
+test$raw_timestamp_part_2 <- NULL
+```
+
+### d) user name
+
+There are 6 corresponding names in the test and training sets, and this feature can be useful. We exclude it because we want to build a generalized model that can give feedback to a new user.
+
+```{r, fig.align='center'}
+train$user_name <- factor(train$user_name)
+test$user_name <- factor(test$user_name)
+
+train.temp <- train
+test.temp <- test
+train.temp$type <- "train"
+test.temp$type <- "test"
+all <- rbind(train.temp, test.temp)
+ggplot(all, aes(x = user_name)) +
+    geom_bar() +
+    facet_wrap(~type, scales="free_y")
+
+train$user_name <- NULL
+test$user_name <- NULL
+```
+    
+### e) data types
+
+Changing data types to numeric.
+
+```{r}
+train[] <- lapply(train, function(x) if(is.integer(x)) as.numeric(x) else x)
+test[] <- lapply(test, function(x) if(is.integer(x)) as.numeric(x) else x)
+```
+
+## 3. Correlation matrix
+
+From the correlation matrix, we see that there are many collinear features:
+
+* the features combined by the position of the sensor (belt, arm, dumbbell, forearm) are strongly correlated with each other.
+
+In order to compare the accuracy of models on a hold out sample. We form a test set, which is a 20% sample from the training data.
+
+```{r}
+num.cols <- names(train)
+train$class <- factor(labels)
+label.num <- dim(train)[2]
+
+isTrain <- createDataPartition(train$class, p = 0.8, list = FALSE)
+train.split <- train[isTrain,]
+valid.split <- train[-isTrain,]
+```
+
+```{r, fig.width=12, fig.height=8}
+cor.matr <- cor(train.split[num.cols])
+corrplot::corrplot(cor.matr, method = "circle")
+```
+
+## 4. Principal Component Analysis
+
+Since there are many collinear features, we will try to pre-process the data using PCA (95% threshold).:
+
+* the initial number of functions is 52;
+* the number of functions after PCA is 25.
+
+```{r}
+fit.PCA <- caret::preProcess(train.split[num.cols], method = "pca", thresh = 0.95)
+```
+
+```{r}
+print(fit.PCA)
+```
+
+```{r}
+train.PCA <- predict(fit.PCA, newdata = train.split)
+valid.PCA <- predict(fit.PCA, newdata = valid.split)
+
+train.PCA$class <- train.split$class
+valid.PCA$class <- valid.split$class
+```
+
+# Model selection
+
+In work [Velloso E. et al, 2013], the authors used a random forest model with `mtry = 10` and the number of trees equal to 10. We also use a random forest model. First, we try to train the model with the original data. Then, we try the model with PCA processing.
+
+The random forest model without PCA processing has the best accuracy (train cv 0.992, test 0.997), while the model with PCA has a train cv accuracy of 0.968 and a test accuracy of 0.981.
+
+The model from [Velloso E. et al, 2013] used a correlation-based feature selection algorithm (17 features were selected). This model has an FPR of 0.5%. In our work, we get an FPR of 0.43%, provided by the model without feature preprocessing (52 functions). The PCA provided only 2.11% of the FPR.
+
+```{r, echo=FALSE}
+score.rf <- data.frame(
+    process = c("None", "PCA"),
+    train = c(0.992, 0.968),
+    test = c(0.997, 0.981)
+)
+kbl(score.rf) %>%
+    kable_styling(
+        bootstrap_options = "striped",
+        full_width = FALSE,
+        position = "center")
+```
+
+## 1. Random forest
+
+### a) tuning parameters
+
+Setting the model parameters is based on the accuracy of cross validation with 5 folds.
+
+```{r, echo=FALSE}
+tune.rf <- data.frame(
+    mtry = c(2, 4, 6, 8, 10, 12, 14, 16),
+    Accuracy = c(0.9900332, 0.9915225, 0.9920770, 0.9921532,
+                 0.9921883, 0.9918340, 0.9916690, 0.9916269),
+    Kappa = c(0.9873843, 0.9892700, 0.9899716, 0.9900680,
+              0.9901126, 0.9896646, 0.9894556, 0.9894021)
+)
+kbl(tune.rf) %>%
+    kable_styling(
+        bootstrap_options = "striped",
+        full_width = FALSE,
+        position = "center")
+```
+
+### b) training
+
+Training with best tuning parameter `mtry = 10`.
+
+```{r, cache=TRUE}
+fit.rf <- randomForest(
+    class ~ .,
+    data = train.split,
+    mtry = 10
+)
+print(fit.rf)
+```
+
+Accuracy on the test, which is a hold out sample from the training data of 20%.
+
+```{r}
+pred <- predict(fit.rf, newdata = valid.split)
+print(Metrics::accuracy(valid.split$class, pred))
+```
+
+### c) confusion matrix
+
+```{r, warning=FALSE, fig.align='center'}
+conf.matr <- confusion_matrix(
+    targets = valid.split$class,
+    predictions = pred
+)
+plot_confusion_matrix(
+    conf.matr$`Confusion Matrix`[[1]],
+    palette = "Oranges"
+)
+```
+
+## 2. Random forest with PCA
+
+### a) tuning parameters
+
+Setting the model parameters is based on the accuracy of cross validation with 5 folds.
+
+```{r, echo=FALSE}
+tune.rf.pca <- data.frame(
+    mtry = c(1, 2, 3, 4, 5, 6, 7, 8),
+    Accuracy = c(0.9665970, 0.9680471, 0.9680756, 0.9680676,
+                 0.9677924, 0.9670300, 0.9664860, 0.9658298),
+    Kappa = c(0.9577256, 0.9595647, 0.9596010, 0.9595916,
+              0.9592443, 0.9582810, 0.9575941, 0.9567635)
+)
+kbl(tune.rf.pca) %>%
+    kable_styling(
+        bootstrap_options = "striped",
+        full_width = FALSE,
+        position = "center")
+```
+
+### b) training
+
+Training with best tuning parameter `mtry = 3`.
+
+```{r, cache=TRUE}
+fit.rf.pca <- randomForest(
+    class ~ .,
+    data = train.PCA,
+    mtry = 3
+)
+print(fit.rf.pca)
+```
+
+Accuracy on the test, which is a hold out sample from the training data of 20%.
+
+
+```{r}
+pred.pca <- predict(fit.rf.pca, newdata = valid.PCA)
+print(Metrics::accuracy(valid.split$class, pred.pca))
+```
+
+### c) confusion matrix
+
+```{r, warning=FALSE, fig.align='center'}
+conf.matr <- confusion_matrix(
+    targets = valid.split$class,
+    predictions = pred.pca
+)
+plot_confusion_matrix(
+    conf.matr$`Confusion Matrix`[[1]],
+    palette = "Oranges"
+)
+```
+
+# Feature importance
+
+Most important features: `roll_belt`, `yaw_belt`, `pitch_forearm`, `magnet_dumbbell_z`, `pitch_belt`, `magnet_dumbbell_y`, `roll_forearm`
+
+The most unimportant features are generated by the arm sensor.
+
+```{r}
+varImpPlot(fit.rf)
+```
+
+# Evaluation
+
+Evaluate best model on test set:
+
+```{r}
+pred.test <- predict(fit.rf, newdata = test)
+eval <- t(data.frame(problem_id = problem.id, prediction = pred.test))
+kbl(eval) %>%
+    kable_styling(
+        bootstrap_options = "striped",
+        full_width = FALSE,
+        position = "center")
+```
+
+# References
+
+* Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
